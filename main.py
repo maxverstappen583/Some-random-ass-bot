@@ -1,41 +1,37 @@
 """
-main.py — MDickie QOTD Bot (single-file)
+main.py — MDickie QOTD Bot (single-file) — FIXED set_channel (accepts mention/ID/name)
 
 Features:
-- Single file (embedded 250-question bank)
-- Flask keep-alive (useful on Render/Replit)
-- Posts a daily QOTD at a server-configured time (Asia/Kolkata)
+- Single file, embedded 250-question bank
+- Flask keep-alive (good for Render/Replit)
+- Posts a daily QOTD at server-configured time (Asia/Kolkata)
 - Slash commands to configure channel/time, schedule one-off posts, force post now, preview, shuffle, list/cancel schedules, status
 - Persistent JSON storage (qotd_data.json)
 - Creates a thread for answers when possible
-- DOS-era QOTDs excluded (none included)
-
-Requirements:
-- Python 3.9+ recommended (zoneinfo used when available)
-- pip install -U discord.py flask
 """
 
 import os
 import json
 import random
-import asyncio
-from datetime import datetime, timedelta, time as dtime, timezone
+from datetime import datetime, timedelta, timezone
 from threading import Thread
+from typing import Optional
 
 import discord
-from discord.ext import commands, tasks
 from discord import app_commands
+from discord.ext import commands, tasks
 from flask import Flask
 
-# timezone: prefer zoneinfo if available
+# Prefer zoneinfo (Python 3.9+). Fallback to fixed IST offset if unavailable.
 try:
     from zoneinfo import ZoneInfo
     KOLKATA_TZ = ZoneInfo("Asia/Kolkata")
 except Exception:
-    # fallback fixed offset IST
     KOLKATA_TZ = timezone(timedelta(hours=5, minutes=30))
 
-# ---------- Embedded question bank (250 MDickie QOTDs) ----------
+# -----------------------
+# Embedded MDickie QOTD bank (250 items)
+# -----------------------
 QUESTIONS = [
     "What was the first MDickie game you ever played?",
     "Which MDickie game do you consider a masterpiece, and why?",
@@ -289,8 +285,11 @@ QUESTIONS = [
     "If you could cameo in one MDickie game, which and doing what?"
 ]
 
-# ---------- Data file ----------
+# -----------------------
+# Persistent data file
+# -----------------------
 DATA_FILE = "qotd_data.json"
+
 
 def load_data():
     if not os.path.exists(DATA_FILE):
@@ -303,31 +302,39 @@ def load_data():
     except Exception:
         return {"guilds": {}}
 
+
 def save_data(d):
     with open(DATA_FILE, "w", encoding="utf-8") as f:
         json.dump(d, f, indent=2, ensure_ascii=False)
 
-def ensure_guild(data, gid_str):
-    g = data["guilds"].setdefault(gid_str, {
-        "channel_id": None,
-        "time_hhmm": "21:00",
-        "enabled": False,
-        "current_index": 0,
-        "one_shot_schedules": [],
-        "last_post_date": None,
-        "order": None
-    })
+
+def ensure_guild(data: dict, gid_str: str) -> dict:
+    g = data["guilds"].setdefault(
+        gid_str,
+        {
+            "channel_id": None,
+            "time_hhmm": "21:00",
+            "enabled": False,
+            "current_index": 0,
+            "one_shot_schedules": [],
+            "last_post_date": None,
+            "order": None,
+        },
+    )
     g.setdefault("one_shot_schedules", [])
     return g
+
 
 def parse_hhmm(hhmm: str):
     parts = hhmm.split(":")
     if len(parts) != 2:
         raise ValueError("Invalid time format")
-    h = int(parts[0]); m = int(parts[1])
+    h = int(parts[0])
+    m = int(parts[1])
     if not (0 <= h < 24 and 0 <= m < 60):
         raise ValueError("Hour/minute out of range")
     return h, m
+
 
 def next_run_dt(now_k: datetime, hhmm: str) -> datetime:
     h, m = parse_hhmm(hhmm)
@@ -336,27 +343,91 @@ def next_run_dt(now_k: datetime, hhmm: str) -> datetime:
         candidate += timedelta(days=1)
     return candidate
 
-# ---------- Flask keep-alive ----------
-app = Flask("qotd_keepalive")
 
-@app.route("/")
+def resolve_text_channel(guild: discord.Guild, channel_input: str) -> Optional[discord.TextChannel]:
+    """
+    Resolve a guild text channel from:
+     - a mention like <#123456789012345678>
+     - a raw numeric ID
+     - a name (with or without leading '#')
+    Returns discord.TextChannel or None.
+    """
+    if not guild:
+        return None
+    s = channel_input.strip()
+
+    # If mention format: <#id>
+    if s.startswith("<#") and s.endswith(">"):
+        try:
+            cid = int(s[2:-1])
+            ch = guild.get_channel(cid)
+            if isinstance(ch, discord.TextChannel):
+                return ch
+        except Exception:
+            pass
+
+    # Strip leading '#'
+    if s.startswith("#"):
+        s = s[1:]
+
+    # If numeric ID
+    if s.isdigit():
+        try:
+            ch = guild.get_channel(int(s))
+            if isinstance(ch, discord.TextChannel):
+                return ch
+        except Exception:
+            pass
+
+    # Exact name match (case-sensitive first)
+    for ch in guild.text_channels:
+        if ch.name == s:
+            return ch
+
+    # Exact case-insensitive
+    for ch in guild.text_channels:
+        if ch.name.lower() == s.lower():
+            return ch
+
+    # Contains match (case-insensitive)
+    for ch in guild.text_channels:
+        if s.lower() in ch.name.lower():
+            return ch
+
+    # No match
+    return None
+
+
+# -----------------------
+# Flask keep-alive
+# -----------------------
+flask_app = Flask("qotd_keepalive")
+
+
+@flask_app.route("/")
 def index():
     return "MDickie QOTD Bot — alive!"
 
+
 def _run_flask():
     port = int(os.environ.get("PORT", 8080))
-    app.run(host="0.0.0.0", port=port)
+    flask_app.run(host="0.0.0.0", port=port)
+
 
 def start_keepalive():
     t = Thread(target=_run_flask, daemon=True)
     t.start()
 
-# ---------- Discord bot ----------
+
+# -----------------------
+# Discord bot
+# -----------------------
 intents = discord.Intents.default()
 bot = commands.Bot(command_prefix="!", intents=intents)
 DATA = load_data()
 
-async def post_qotd(guild_id: int, q_idx_override=None):
+
+async def post_qotd(guild_id: int, q_idx_override: Optional[int] = None):
     gid = str(guild_id)
     g = DATA["guilds"].get(gid)
     if not g or not g.get("channel_id"):
@@ -365,7 +436,7 @@ async def post_qotd(guild_id: int, q_idx_override=None):
     if channel is None:
         return
 
-    pool = list(QUESTIONS)  # DOS-era excluded
+    pool = list(QUESTIONS)
     if not pool:
         return
 
@@ -398,13 +469,15 @@ async def post_qotd(guild_id: int, q_idx_override=None):
     except Exception as e:
         print(f"[post_qotd] failed for guild {guild_id}: {e}")
 
-# Scheduler: checks every 15s
+
+# Scheduler: checks every 15 seconds
 @tasks.loop(seconds=15.0)
 async def scheduler_loop():
     now_k = datetime.now(KOLKATA_TZ)
     today_iso = now_k.date().isoformat()
+
     for gid_str, g in list(DATA["guilds"].items()):
-        # one-shot schedules
+        # handle one-shot schedules
         remaining = []
         for s in g.get("one_shot_schedules", []):
             run_at_iso = s.get("run_at")
@@ -413,7 +486,7 @@ async def scheduler_loop():
                 if dt.tzinfo is None:
                     dt = dt.replace(tzinfo=KOLKATA_TZ)
             except Exception:
-                # skip malformed
+                # malformed entry -> skip (drop)
                 continue
             if now_k >= dt:
                 await post_qotd(int(gid_str), q_idx_override=s.get("q_idx"))
@@ -424,7 +497,7 @@ async def scheduler_loop():
             DATA["guilds"][gid_str] = g
             save_data(DATA)
 
-        # daily posting (avoid duplicates)
+        # handle daily posting (avoid duplicates on same day)
         if g.get("enabled") and g.get("time_hhmm") and g.get("channel_id"):
             try:
                 h, m = parse_hhmm(g["time_hhmm"])
@@ -435,27 +508,40 @@ async def scheduler_loop():
                         DATA["guilds"][gid_str] = g
                         save_data(DATA)
             except Exception:
+                # ignore bad time format
                 continue
+
 
 @scheduler_loop.before_loop
 async def before_scheduler():
     await bot.wait_until_ready()
 
-# ---------- Slash command group ----------
+
+# -----------------------
+# Slash command group /qotd
+# -----------------------
 @app_commands.default_permissions(manage_guild=True)
 class QOTDGroup(app_commands.Group):
     def __init__(self):
         super().__init__(name="qotd", description="Configure MDickie QOTD (Manage Server required)")
 
-    @app_commands.command(name="set_channel", description="Set the channel for QOTD posts")
-    async def set_channel(self, interaction: discord.Interaction, channel: discord.TextChannel):
+    @app_commands.command(name="set_channel", description="Set the channel for QOTD (mention, ID, or name)")
+    @app_commands.describe(channel="Channel mention (<#id>), numeric ID, or channel name")
+    async def set_channel(self, interaction: discord.Interaction, channel: str):
         gid = str(interaction.guild_id)
         ensure_guild(DATA, gid)
-        DATA["guilds"][gid]["channel_id"] = channel.id
+
+        channel_obj = resolve_text_channel(interaction.guild, channel)
+        if not channel_obj:
+            await interaction.response.send_message("❌ Could not find that text channel. Try mention, ID, or exact name.", ephemeral=True)
+            return
+
+        DATA["guilds"][gid]["channel_id"] = channel_obj.id
         save_data(DATA)
-        await interaction.response.send_message(f"✅ QOTD channel set to {channel.mention}", ephemeral=True)
+        await interaction.response.send_message(f"✅ QOTD channel set to {channel_obj.mention}", ephemeral=True)
 
     @app_commands.command(name="set_time", description="Set daily QOTD time (Asia/Kolkata) in HH:MM (24h)")
+    @app_commands.describe(hhmm="Time in HH:MM (24-hour), Asia/Kolkata")
     async def set_time(self, interaction: discord.Interaction, hhmm: str):
         try:
             parse_hhmm(hhmm)
@@ -465,7 +551,7 @@ class QOTDGroup(app_commands.Group):
         gid = str(interaction.guild_id)
         ensure_guild(DATA, gid)
         DATA["guilds"][gid]["time_hhmm"] = hhmm
-        DATA["guilds"][gid]["last_post_date"] = None
+        DATA["guilds"][gid]["last_post_date"] = None  # reset so new time can post same day if needed
         save_data(DATA)
         await interaction.response.send_message(f"✅ Daily QOTD time set to **{hhmm} (Asia/Kolkata)**", ephemeral=True)
 
@@ -489,7 +575,8 @@ class QOTDGroup(app_commands.Group):
         await interaction.response.send_message("⏸️ Daily QOTD disabled.", ephemeral=True)
 
     @app_commands.command(name="schedule_once", description="Schedule a one-time QOTD at HH:MM (Asia/Kolkata). Optional question index (1..250).")
-    async def schedule_once(self, interaction: discord.Interaction, hhmm: str, q_index: int = None):
+    @app_commands.describe(hhmm="Time in HH:MM (Asia/Kolkata)", q_index="Optional question number (1..250)")
+    async def schedule_once(self, interaction: discord.Interaction, hhmm: str, q_index: Optional[int] = None):
         gid = str(interaction.guild_id)
         g = ensure_guild(DATA, gid)
         if not g.get("channel_id"):
@@ -600,13 +687,17 @@ class QOTDGroup(app_commands.Group):
         pending = len(g.get("one_shot_schedules", []))
         await interaction.response.send_message(
             f"**MDickie QOTD Status**\n• Channel: {ch}\n• Time (Asia/Kolkata): **{time_str}**\n• Enabled: **{enabled}**\n• Next index: **{idx}/{total}**\n• One-time schedules: **{pending}**",
-            ephemeral=True
+            ephemeral=True,
         )
 
-# register group
+
+# Register the group
 bot.tree.add_command(QOTDGroup())
 
-# ---------- Events ----------
+
+# -----------------------
+# Events
+# -----------------------
 @bot.event
 async def on_ready():
     try:
@@ -617,7 +708,10 @@ async def on_ready():
         scheduler_loop.start()
     print(f"Logged in as {bot.user} (ID: {bot.user.id})")
 
-# ---------- Entrypoint ----------
+
+# -----------------------
+# Entrypoint
+# -----------------------
 def main():
     start_keepalive()
     token = os.getenv("DISCORD_BOT_TOKEN", None)
@@ -625,6 +719,7 @@ def main():
         print("ERROR: set DISCORD_BOT_TOKEN environment variable (or edit main.py to include it).")
         return
     bot.run(token)
+
 
 if __name__ == "__main__":
     main()
