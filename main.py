@@ -2,11 +2,28 @@ import discord
 from discord.ext import commands
 import os
 from dotenv import load_dotenv
+from flask import Flask
+from threading import Thread
 
 # Load environment variables
 load_dotenv()
 TOKEN = os.getenv("DISCORD_TOKEN")
 
+# Flask app for uptime pings
+app = Flask(__name__)
+
+@app.route("/")
+def home():
+    return "Bot is running!"
+
+def run():
+    app.run(host="0.0.0.0", port=8080)
+
+def keep_alive():
+    t = Thread(target=run)
+    t.start()
+
+# Discord bot
 bot = commands.Bot(command_prefix="!", intents=discord.Intents.all())
 
 @bot.command()
@@ -47,4 +64,6 @@ async def plans(ctx):
 
     await ctx.send(embed=embed)
 
+# Start Flask + Bot
+keep_alive()
 bot.run(TOKEN)
