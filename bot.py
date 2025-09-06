@@ -90,7 +90,7 @@ def create_plans_embed():
         inline=True
     )
 
-    embed.set_footer(text="Contact me on Discord → [your username here]")
+    embed.set_footer(text="Contact me on Discord → [@u4_straight1]")
     return embed
 
 # -------------------------
